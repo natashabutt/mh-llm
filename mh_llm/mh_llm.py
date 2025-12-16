@@ -15,6 +15,10 @@ _ACCEPTANCE_THRESHOLD = 1 - 1e-5
 
 class _dummytqdm:
 
+  def __init__(self, *args, **kwargs):
+    """Accept any arguments but ignore them."""
+    pass
+
   def __enter__(self):
     return self
 
