@@ -114,6 +114,7 @@ class MHLLM:
       block_size: int = 192,
       max_new_tokens: int = 3_072,
       num_mcmc_steps: int = 10,
+      verbose: bool = False,
   ) -> str:
     """Perform Metropolis-Hastings sampling for a single prompt.
 
@@ -127,9 +128,17 @@ class MHLLM:
             generate. Defaults to 3,072.
         num_mcmc_steps (int, optional): The number of MCMC steps to perform.
             Defaults to 10.
+        verbose (bool, optional): Whether to print debug info. Defaults to False.
     Returns:
         str: The generated text output.
     """
+    import time as _time
+    import sys
+    
+    def _log(msg):
+      if verbose:
+        print(f"[MH-DEBUG] {msg}", file=sys.stderr, flush=True)
+    
     # override certain sampling parameter values
     sampling_params = copy.deepcopy(sampling_params)
     sampling_params.n = 1  # always generate 1 sample
@@ -140,24 +149,37 @@ class MHLLM:
     power_logprob: list[float] = []
 
     block_steps = (int(math.ceil(max_new_tokens / block_size) + 1))
+    _log(f"Starting MH sampling: {block_steps} blocks, {num_mcmc_steps} MCMC steps each")
+    
     for k in range(0, block_steps):
+      _log(f"Block {k+1}/{block_steps}: starting initial generation...")
+      block_start = _time.time()
+      
       sampling_params.max_tokens = block_size
       _prompt = self._generate_intermediate_prompt(
           prompt,
           output_tokens,
       )
+      
+      gen_start = _time.time()
       output = self.llm.generate(
           _prompt,
           sampling_params=sampling_params,
           use_tqdm=False,
       )
+      gen_elapsed = _time.time() - gen_start
+      _log(f"Block {k+1}: initial generation took {gen_elapsed:.2f}s")
+      
       out = output[0].outputs[0]
 
       output_tokens.extend(out.token_ids)
       logprob.extend(self._extract_logprobs(out.logprobs))
       power_logprob.extend(self._extract_logprobs(out.power_logprobs))
+      
+      _log(f"Block {k+1}: total tokens so far: {len(output_tokens)}")
 
-      for _ in range(num_mcmc_steps):
+      for mcmc_step in range(num_mcmc_steps):
+        mcmc_start = _time.time()
         # Propose new tokens starting from a randomly sampled position
         idx = random.randint(0, len(output_tokens) - 2)
         mcmc_prompt = self._generate_intermediate_prompt(
@@ -165,12 +187,18 @@ class MHLLM:
             output_tokens[:idx],
         )
         sampling_params.max_tokens = len(output_tokens) - idx
+        
+        _log(f"Block {k+1}, MCMC {mcmc_step+1}/{num_mcmc_steps}: generating from idx={idx}, max_tokens={sampling_params.max_tokens}")
+        
         mcmc_output = self.llm.generate(
             mcmc_prompt,
             sampling_params=sampling_params,
             use_tqdm=False,
         )
         out = mcmc_output[0].outputs[0]
+        
+        mcmc_elapsed = _time.time() - mcmc_start
+        _log(f"Block {k+1}, MCMC {mcmc_step+1}: generation took {mcmc_elapsed:.2f}s")
 
         # get proposed logprobs as a list and as tensor
         proposed_logprobs = self._extract_logprobs(out.logprobs)
@@ -196,8 +224,15 @@ class MHLLM:
           output_tokens = output_tokens[:idx] + out.token_ids
           logprob = logprob[:idx] + proposed_logprobs
           power_logprob = power_logprob[:idx] + proposed_power_logprobs
+          _log(f"Block {k+1}, MCMC {mcmc_step+1}: ACCEPTED (A={A:.4f})")
+        else:
+          _log(f"Block {k+1}, MCMC {mcmc_step+1}: rejected (A={A:.4f})")
+
+      block_elapsed = _time.time() - block_start
+      _log(f"Block {k+1}/{block_steps} completed in {block_elapsed:.2f}s")
 
       if output_tokens[-1] == self.tokenizer.eos_token_id:
+        _log(f"EOS token found, stopping early at block {k+1}")
         break
 
     return self.tokenizer.decode(
@@ -213,6 +248,7 @@ class MHLLM:
       max_new_tokens: int = 3_072,
       num_mcmc_steps: int = 10,
       use_tqdm: bool = True,
+      verbose: bool = False,
   ) -> list[str]:
     """Generate text using MH sampling in batch mode.
 
@@ -230,6 +266,7 @@ class MHLLM:
             Defaults to 10.
         use_tqdm (bool, optional): Whether to use tqdm for progress tracking.
             Defaults to True.
+        verbose (bool, optional): Whether to print debug info. Defaults to False.
 
     Returns:
         str | list[str]: The generated text outputs.
@@ -241,6 +278,7 @@ class MHLLM:
           block_size,
           max_new_tokens,
           num_mcmc_steps,
+          verbose=verbose,
       )
     # override certain sampling parameter values
     sampling_params = _copy_sampling_params(
