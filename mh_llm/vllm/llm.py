@@ -1,22 +1,13 @@
 from typing import Any
 
-# vLLM's public config symbols have changed across versions (e.g. `ModelDType`
-# was removed/renamed). Only require it when available.
-try:
-    from vllm.config import (  # type: ignore
-        CompilationConfig,
-        ModelDType,
-        StructuredOutputsConfig,
-        TokenizerMode,
-    )
-except ImportError:
-    from vllm.config import (  # type: ignore
-        CompilationConfig,
-        StructuredOutputsConfig,
-        TokenizerMode,
-    )
-    # Fallback typing alias for newer vLLM versions.
-    ModelDType = Any  # type: ignore
+# vLLM's public config API changes across versions (some symbols move/rename).
+# Import `vllm.config` once and fall back per-symbol to avoid hard import errors.
+import vllm.config as _vllm_config  # type: ignore
+
+CompilationConfig = getattr(_vllm_config, "CompilationConfig", Any)  # type: ignore
+ModelDType = getattr(_vllm_config, "ModelDType", Any)  # type: ignore
+StructuredOutputsConfig = getattr(_vllm_config, "StructuredOutputsConfig", Any)  # type: ignore
+TokenizerMode = getattr(_vllm_config, "TokenizerMode", Any)  # type: ignore
     
 from vllm.engine.arg_utils import (
     ConvertOption,
