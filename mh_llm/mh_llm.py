@@ -104,7 +104,7 @@ class MHLLM:
     """
     return prompt + self.tokenizer.decode(
         proposed_tokens,
-        skip_special_tokens=True,
+        skip_special_tokens=False,
     )
 
   def _mh_sample(
@@ -149,6 +149,11 @@ class MHLLM:
     stop_ids = {self.tokenizer.eos_token_id}
     if im_end_id and im_end_id != self.tokenizer.unk_token_id:
       stop_ids.add(im_end_id)
+    # Important: vLLM does not automatically stop on chat end-of-turn tokens
+    # (e.g., Qwen's <|im_end|>) unless we pass them explicitly. If we don't,
+    # generation can run until max_tokens / max_model_len and appear "hung"
+    # for chat-templated prompts.
+    sampling_params.stop_token_ids = sorted([sid for sid in stop_ids if sid is not None])
 
     output_tokens = []
     logprob: list[float] = []
@@ -184,10 +189,18 @@ class MHLLM:
       
       _log(f"Block {k+1}: total tokens so far: {len(output_tokens)}")
 
+      # Check for stop token BEFORE MCMC to avoid MCMC overwriting it
+      if output_tokens[-1] in stop_ids:
+        _log(f"Stop token found after initial generation, stopping at block {k+1}")
+        break
+
       for mcmc_step in range(num_mcmc_steps):
         mcmc_start = _time.time()
         # Propose new tokens starting from a randomly sampled position
-        idx = random.randint(0, len(output_tokens) - 2)
+        idx = random.randint(
+            0,
+            len(output_tokens) - 1,
+        ) if len(output_tokens) > 1 else 0
         mcmc_prompt = self._generate_intermediate_prompt(
             prompt,
             output_tokens[:idx],
@@ -298,6 +311,8 @@ class MHLLM:
     stop_ids = {self.tokenizer.eos_token_id}
     if im_end_id and im_end_id != self.tokenizer.unk_token_id:
       stop_ids.add(im_end_id)
+    # See comment in _mh_sample(): ensure vLLM stops as soon as EOS/<|im_end|> is generated.
+    sampling_params.stop_token_ids = sorted([sid for sid in stop_ids if sid is not None])
 
     remaining_prompt_idx = list(range(len(prompts)))
 
@@ -337,6 +352,21 @@ class MHLLM:
           output_tokens[i].extend(out.token_ids)
           logprob[i].extend(self._extract_logprobs(out.logprobs))
           power_logprob[i].extend(self._extract_logprobs(out.power_logprobs))
+
+        # IMPORTANT: If a prompt already ended (EOS / <|im_end|>) after the
+        # initial block generation, stop it *before* MCMC. Otherwise MCMC
+        # proposals can overwrite the terminal token and the later stop check
+        # may fail, causing runaway generation for chat-templated prompts.
+        new_remaining_prompt_idx = []
+        for i in remaining_prompt_idx:
+          if output_tokens[i] and output_tokens[i][-1] in stop_ids:
+            pbar.update(1)
+          else:
+            new_remaining_prompt_idx.append(i)
+        remaining_prompt_idx = new_remaining_prompt_idx
+
+        if not remaining_prompt_idx:
+          break
 
         # Perform MCMC steps for all remaining prompts
         for _ in range(num_mcmc_steps):
@@ -416,10 +446,13 @@ class MHLLM:
                                   proposed_power_logprobs_list[batch_idx])
 
         # Remove prompts that have generated a stop token (EOS or <|im_end|>)
+        new_remaining_prompt_idx = []
         for i in remaining_prompt_idx:
-          if output_tokens[i][-1] in stop_ids:
-            remaining_prompt_idx.remove(i)
+          if output_tokens[i] and output_tokens[i][-1] in stop_ids:
             pbar.update(1)
+          else:
+            new_remaining_prompt_idx.append(i)
+        remaining_prompt_idx = new_remaining_prompt_idx
 
         if not remaining_prompt_idx:
           break
