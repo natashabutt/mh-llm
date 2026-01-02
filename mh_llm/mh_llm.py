@@ -144,6 +144,12 @@ class MHLLM:
     sampling_params.n = 1  # always generate 1 sample
     sampling_params.logprobs = 1  # always return 1 logprob
 
+    # Build set of stop token IDs (EOS + <|im_end|> for chat template models like Qwen)
+    im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+    stop_ids = {self.tokenizer.eos_token_id}
+    if im_end_id and im_end_id != self.tokenizer.unk_token_id:
+      stop_ids.add(im_end_id)
+
     output_tokens = []
     logprob: list[float] = []
     power_logprob: list[float] = []
@@ -231,8 +237,8 @@ class MHLLM:
       block_elapsed = _time.time() - block_start
       _log(f"Block {k+1}/{block_steps} completed in {block_elapsed:.2f}s")
 
-      if output_tokens[-1] == self.tokenizer.eos_token_id:
-        _log(f"EOS token found, stopping early at block {k+1}")
+      if output_tokens[-1] in stop_ids:
+        _log(f"Stop token found, stopping early at block {k+1}")
         break
 
     return self.tokenizer.decode(
@@ -286,6 +292,12 @@ class MHLLM:
         n=1,
         logprobs=1,
     )
+
+    # Build set of stop token IDs (EOS + <|im_end|> for chat template models like Qwen)
+    im_end_id = self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+    stop_ids = {self.tokenizer.eos_token_id}
+    if im_end_id and im_end_id != self.tokenizer.unk_token_id:
+      stop_ids.add(im_end_id)
 
     remaining_prompt_idx = list(range(len(prompts)))
 
@@ -403,9 +415,9 @@ class MHLLM:
               power_logprob[i] = (power_logprob[i][:idx_list[batch_idx]] +
                                   proposed_power_logprobs_list[batch_idx])
 
-        # Remove prompts that have generated EOS token
+        # Remove prompts that have generated a stop token (EOS or <|im_end|>)
         for i in remaining_prompt_idx:
-          if output_tokens[i][-1] == self.tokenizer.eos_token_id:
+          if output_tokens[i][-1] in stop_ids:
             remaining_prompt_idx.remove(i)
             pbar.update(1)
 
